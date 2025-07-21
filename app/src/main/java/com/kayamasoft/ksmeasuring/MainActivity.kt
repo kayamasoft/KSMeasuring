@@ -47,6 +47,7 @@ import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import androidx.compose.foundation.text.ClickableText
+import android.os.PowerManager
 
 class MainActivity : ComponentActivity() {
 
@@ -58,11 +59,25 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val requiredPermissions = arrayOf(
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val packageName = applicationContext.packageName
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = android.net.Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
+
+        // ✅ Android 13以降は通知権限も必要なので、条件付きで追加
+        val requiredPermissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.READ_PHONE_STATE
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requiredPermissions += Manifest.permission.POST_NOTIFICATIONS
+        }
 
         val missingPermissions = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -89,11 +104,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun hasAllPermissions(context: Context): Boolean {
-        val requiredPermissions = arrayOf(
+        val requiredPermissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.READ_PHONE_STATE
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requiredPermissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+
         return requiredPermissions.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -113,6 +132,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -180,7 +200,7 @@ fun AppInfoSection() {
     Column(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
         Text("アプリ情報", style = MaterialTheme.typography.titleMedium)
         Text("KS Measuring")
-        Text("Version 1.0.0")
+        Text("Version 1.0.1")
         Text("KayamaSoft")
         ClickableLink(label = "KayamaSoft Webページ", url = "https://www.kayamasoft.org")
         ClickableLink(label = "プライバシーポリシー", url = "https://www.kayamasoft.org/privacy.html")
@@ -251,19 +271,6 @@ fun SignalInfoScreen(telephonyManager: TelephonyManager, connectivityManager: Co
 
             signalInfo = getSignalInfo(context, telephonyManager, connectivityManager, dlMbps, ulMbps, rsrpHistory)
 
-            try {
-                val outputStream = FileOutputStream(logFile, true)
-                val writer = OutputStreamWriter(outputStream, StandardCharsets.UTF_8)
-                if (!headerWritten) {
-                    writer.write("\uFEFF") // BOM
-                    writer.append(signalInfo.joinToString(",") { escapeCsv(it.first) }).append("\n")
-                    headerWritten = true
-                }
-                writer.append(signalInfo.joinToString(",") { escapeCsv(it.second) }).append("\n")
-                writer.flush()
-                writer.close()
-            } catch (_: Exception) {}
-
             delay(1000L)
         }
     }
@@ -290,6 +297,27 @@ fun SignalInfoScreen(telephonyManager: TelephonyManager, connectivityManager: Co
                 drawCircle(Color.Red, radius = 4f, center = androidx.compose.ui.geometry.Offset(x, y))
             }
         }
+
+        val context = LocalContext.current
+        var isLogging by remember { mutableStateOf(false) }
+
+        Button(
+            onClick = {
+                if (!isLogging) {
+                    context.startForegroundService(Intent(context, SignalLoggingService::class.java))
+                    isLogging = true
+                } else {
+                    context.stopService(Intent(context, SignalLoggingService::class.java))
+                    isLogging = false
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+        ) {
+            Text(if (isLogging) "ログ停止" else "ログ開始")
+        }
+
     }
 }
 
@@ -333,19 +361,18 @@ fun getSignalInfo(
     var asu = ""
     var cellType = ""
     var plmn = ""
-    var nci = ""
-    var nrTAC = ""
-    var timingAdvance = "-"
+    var BS_band = ""
+    var cqiReport = ""
 
     if (primary != null) {
         when (primary) {
             is CellInfoLte -> {
                 val id = primary.cellIdentity as CellIdentityLte
                 val s = primary.cellSignalStrength as CellSignalStrengthLte
-                rsrp = "${s.rsrp} dBm".also { rsrpHistory.add(s.rsrp.toFloat()) }
-                rsrq = "${s.rsrq} dB"
-                sinr = "${s.rssnr} dB"
-                dbm = "${s.dbm} dBm"
+                rsrp = "${s.rsrp}".also { rsrpHistory.add(s.rsrp.toFloat()) }
+                rsrq = "${s.rsrq}"
+                sinr = "${s.rssnr}"
+                dbm = "${s.dbm}"
                 pci = id.pci.toString()
                 tac = id.tac.toString()
                 eci = id.ci.toString()
@@ -353,38 +380,73 @@ fun getSignalInfo(
                 band = BandMapper.getLteBand(id.earfcn)
                 asu = s.asuLevel.toString()
                 level = getSignalLevelString(s.level)
-                timingAdvance = s.timingAdvance.toString()
                 cellType = "CellInfoLte"
                 plmn = id.mccString + id.mncString
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val bandsArray = id.bands
+                    if (bandsArray.isNotEmpty()) {
+                        BS_band += "B" + bandsArray.joinToString(",B")
+                    }
+                }
             }
             is CellInfoNr -> {
                 val id = primary.cellIdentity as CellIdentityNr
                 val s = primary.cellSignalStrength as CellSignalStrengthNr
-                rsrp = "${s.dbm} dBm".also { rsrpHistory.add(s.dbm.toFloat()) }
-                sinr = "不明"
-                dbm = "${s.dbm} dBm"
-                pci = "-"
-                nrTAC = id.tac.toString()
-                nci = id.nci.toString()
+
+                rsrp = "${s.dbm}".also { rsrpHistory.add(s.dbm.toFloat()) }
+                rsrq = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    "${s.ssRsrq}"
+                } else {
+                    "不明"
+                }
+                sinr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    "${s.ssSinr}"
+                } else {
+                    "不明"
+                }
+                dbm = "${s.dbm}"
+                pci = id.pci.toString()
+                tac = id.tac.toString()
+                eci = id.nci.toString()
                 earfcn = id.nrarfcn.toString()
                 band = BandMapper.getNrBand(id.nrarfcn)
                 asu = s.asuLevel.toString()
                 level = getSignalLevelString(s.level)
                 cellType = "CellInfoNr"
                 plmn = id.mccString + id.mncString
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val bandsArray = id.bands
+                    if (bandsArray.isNotEmpty()) {
+                        BS_band += "n" + bandsArray.joinToString(",n")
+                    }
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val cqiList = (primary.cellSignalStrength as? CellSignalStrengthNr)?.csiCqiReport
+                    cqiReport = if (!cqiList.isNullOrEmpty()) {
+                        "${cqiList.joinToString()} (Avg: ${cqiList.average().toInt()})"
+                    } else {
+                        "未取得"
+                    }
+                }
             }
+
         }
     }
 
-    items += "ECI" to eci
-    items += "TAC" to (if (networkType == TelephonyManager.NETWORK_TYPE_NR) nrTAC else tac)
+    items += "CellType" to cellType
+    items += "ECI / NCI" to eci
+    items += "TAC" to tac
     items += "PCI" to pci
-    items += "RSRP" to rsrp
-    items += "RSRQ" to rsrq
-    items += "SINR / SNR" to sinr
-    items += "受信電力の絶対値" to dbm
-    items += "DLスループット" to "%.2f Mbps".format(dlMbps)
-    items += "ULスループット" to "%.2f Mbps".format(ulMbps)
+    items += "RSRP(dBm)" to rsrp
+    items += "SS-RSRP" to dbm
+    items += "RSRQ(dB)" to rsrq
+    items += "SINR(dB)" to sinr
+    items += "Band" to BS_band
+    items += "QCI" to cqiReport
+    items += "DL Thp.(Mbps)" to "%.2f".format(dlMbps)
+    items += "UL Thp.(Mbps)" to "%.2f".format(ulMbps)
     items += "Neighbor Cell" to cellList.filter { !it.isRegistered }.take(5)
         .joinToString { ci ->
             when (ci) {
@@ -393,15 +455,12 @@ fun getSignalInfo(
                 else -> "-"
             }
         }
-    items += "CAの有無" to "不明"
     items += "アンテナピクトの数" to level
     items += "EARFCN / NRARFCN" to earfcn
-    items += "Band" to band
     items += "ASU" to asu
     items += "is_Registered" to (primary?.isRegistered?.toString() ?: "不明")
-    items += "CellType" to cellType
     items += "Registered PLMN" to plmn
-    items += "NR Cell Identity" to nci
+    items += "APN" to (tm.simOperatorName ?: "不明")
     items += "サービス状態" to when (tm.serviceState?.state) {
         ServiceState.STATE_IN_SERVICE -> "圏内"
         ServiceState.STATE_OUT_OF_SERVICE -> "圏外"
@@ -417,7 +476,6 @@ fun getSignalInfo(
         TelephonyManager.SIM_STATE_ABSENT -> "ABSENT"
         else -> "OTHER"
     }
-    items += "APN" to (tm.simOperatorName ?: "不明")
     return items
 }
 
@@ -442,3 +500,4 @@ fun networkTypeToString(type: Int): String = when (type) {
     20 -> "5G NR"
     else -> "不明($type)"
 }
+
