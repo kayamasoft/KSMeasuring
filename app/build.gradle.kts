@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.kayamasoft.ksmeasuring"
-    compileSdk = 36
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.kayamasoft.ksmeasuring"
-        minSdk = 33
-        targetSdk = 36
+        minSdk = 29
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
