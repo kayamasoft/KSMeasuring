@@ -48,6 +48,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import androidx.compose.foundation.text.ClickableText
 import android.os.PowerManager
+import androidx.compose.runtime.saveable.rememberSaveable
 
 class MainActivity : ComponentActivity() {
 
@@ -69,7 +70,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // ✅ Android 13以降は通知権限も必要なので、条件付きで追加
         val requiredPermissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             KSMeasuringTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    // 権限がリクエスト中の場合、まだ UI を表示しないようにする
+                    //権限がリクエスト中の場合、UIを表示しないようにする
                     if (!permissionRequested || hasAllPermissions(this)) {
                         AppScaffold(telephonyManager, connectivityManager)
                     }
@@ -128,7 +128,7 @@ class MainActivity : ComponentActivity() {
             if (grantResults.isNotEmpty() && grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
                 Toast.makeText(this, "一部の権限が拒否されました。アプリが正しく動作しない可能性があります。", Toast.LENGTH_LONG).show()
             } else {
-                recreate() // 権限が付与された場合に UI を再描画
+                recreate()
             }
         }
     }
@@ -200,8 +200,9 @@ fun AppInfoSection() {
     Column(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
         Text("アプリ情報", style = MaterialTheme.typography.titleMedium)
         Text("KS Measuring")
-        Text("Version 1.0.1")
+        Text("Version 1.0.2")
         Text("KayamaSoft")
+        Text("Licensed under the Apache License 2.0")
         ClickableLink(label = "KayamaSoft Webページ", url = "https://www.kayamasoft.org")
         ClickableLink(label = "プライバシーポリシー", url = "https://www.kayamasoft.org/privacy.html")
         ClickableLink(label = "お問い合わせ", url = "mailto:hello@kayamasoft.org")
@@ -232,22 +233,31 @@ fun ClickableLink(label: String, url: String) {
     )
 }
 
+fun isLoggingServiceRunning(context: Context): Boolean {
+    val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+    @Suppress("DEPRECATION")
+    return manager.getRunningServices(Int.MAX_VALUE).any {
+        it.service.className == SignalLoggingService::class.java.name
+    }
+}
+
 @Composable
 fun SignalInfoScreen(telephonyManager: TelephonyManager, connectivityManager: ConnectivityManager) {
     val context = LocalContext.current
     var signalInfo by remember { mutableStateOf(listOf<Pair<String, String>>()) }
     val rsrpHistory = remember { mutableStateListOf<Float>() }
 
-    val logDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "ksmeasuring")
-    if (!logDir.exists()) logDir.mkdirs()
-    val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
-    val logFile = File(logDir, "KSM_${timestamp}.csv")
-
     var lastRxBytes by remember { mutableStateOf(TrafficStats.getTotalRxBytes()) }
     var lastTxBytes by remember { mutableStateOf(TrafficStats.getTotalTxBytes()) }
     var lastTimeMillis by remember { mutableStateOf(System.currentTimeMillis()) }
 
-    var headerWritten by remember { mutableStateOf(logFile.exists()) }
+    var isLogging by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            isLogging = isLoggingServiceRunning(context)
+            delay(1000L)
+        }
+    }
 
     fun escapeCsv(value: String): String {
         return if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
@@ -299,16 +309,19 @@ fun SignalInfoScreen(telephonyManager: TelephonyManager, connectivityManager: Co
         }
 
         val context = LocalContext.current
-        var isLogging by remember { mutableStateOf(false) }
+        val isLogging by produceState(initialValue = false) {
+            while (true) {
+                value = isLoggingServiceRunning(context)
+                delay(1000)
+            }
+        }
 
         Button(
             onClick = {
                 if (!isLogging) {
                     context.startForegroundService(Intent(context, SignalLoggingService::class.java))
-                    isLogging = true
                 } else {
                     context.stopService(Intent(context, SignalLoggingService::class.java))
-                    isLogging = false
                 }
             },
             modifier = Modifier
@@ -317,7 +330,6 @@ fun SignalInfoScreen(telephonyManager: TelephonyManager, connectivityManager: Co
         ) {
             Text(if (isLogging) "ログ停止" else "ログ開始")
         }
-
     }
 }
 
@@ -440,7 +452,6 @@ fun getSignalInfo(
     items += "TAC" to tac
     items += "PCI" to pci
     items += "RSRP(dBm)" to rsrp
-    items += "SS-RSRP" to dbm
     items += "RSRQ(dB)" to rsrq
     items += "SINR(dB)" to sinr
     items += "Band" to BS_band
@@ -448,14 +459,15 @@ fun getSignalInfo(
     items += "DL Thp.(Mbps)" to "%.2f".format(dlMbps)
     items += "UL Thp.(Mbps)" to "%.2f".format(ulMbps)
     items += "Neighbor Cell" to cellList.filter { !it.isRegistered }.take(5)
-        .joinToString { ci ->
+        .mapIndexed { index, ci ->
             when (ci) {
-                is CellInfoLte -> "LTE:${ci.cellIdentity.pci}/${ci.cellSignalStrength.dbm}"
-                is CellInfoNr -> "NR:${(ci.cellIdentity as CellIdentityNr).nci}/${ci.cellSignalStrength.dbm}"
-                else -> "-"
+                is CellInfoLte -> "${index + 1}. LTE:${ci.cellIdentity.pci}/${ci.cellSignalStrength.dbm}"
+                is CellInfoNr -> "${index + 1}. NR:${(ci.cellIdentity as CellIdentityNr).nci}/${ci.cellSignalStrength.dbm}"
+                else -> "${index + 1}. -"
             }
-        }
-    items += "アンテナピクトの数" to level
+        }.joinToString(separator = "\n")
+
+    items += "OS評価レベル" to level
     items += "EARFCN / NRARFCN" to earfcn
     items += "ASU" to asu
     items += "is_Registered" to (primary?.isRegistered?.toString() ?: "不明")
@@ -480,11 +492,11 @@ fun getSignalInfo(
 }
 
 fun getSignalLevelString(level: Int): String = when (level) {
-    4 -> "4"
-    3 -> "3"
-    2 -> "2"
-    1 -> "1"
-    0 -> "0"
+    4 -> "Excellent"
+    3 -> "Good"
+    2 -> "Moderate"
+    1 -> "Poor"
+    0 -> "None or Unknown"
     else -> "Unknown"
 }
 

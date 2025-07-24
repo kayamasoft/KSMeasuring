@@ -62,7 +62,14 @@ class SignalLoggingService : Service() {
                                 writer.append(info.joinToString(",") { it.first }).append("\n")
                                 headerWritten = true
                             }
-                            writer.append(info.joinToString(",") { it.second }).append("\n")
+                            writer.append(info.joinToString(",") { (label, value) ->
+                                val formattedValue = if (label == "Neighbor Cell") {
+                                    value.replace("\n", "; ")
+                                } else {
+                                    value
+                                }
+                                escapeCsv(formattedValue)
+                            }).append("\n")
                         }
                     }
                 } catch (_: Exception) { }
@@ -70,6 +77,14 @@ class SignalLoggingService : Service() {
                 Thread.sleep(1000)
             }
         }.start()
+    }
+
+    fun escapeCsv(value: String): String {
+        return if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
+            "\"" + value.replace("\"", "\"\"") + "\""
+        } else {
+            value
+        }
     }
 
     override fun onDestroy() {
